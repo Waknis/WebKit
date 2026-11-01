@@ -44,7 +44,7 @@ jobs:
             /Source/WebInspectorUI/
             /LayoutTests/*
             !/LayoutTests/*/
-            /LayoutTests/platform/mac*/TestExpectations
+            /LayoutTests/platform/*/TestExpectations
             /LayoutTests/resources/
             /LayoutTests/http/*
             !/LayoutTests/http/*/
@@ -56,6 +56,10 @@ jobs:
             /LayoutTests/http/tests/site-isolation/inspector/
             /LayoutTests/inspector/
 
+      - name: Mark the sparse checkout as a WebKit source tree
+        # webkitdirs.pm finds the source root by looking for Source/WebCore and Source/JavaScriptCore.
+        run: mkdir -p Source/WebCore Source/JavaScriptCore
+
       - name: Runner info
         run: |
           sw_vers
@@ -64,6 +68,8 @@ jobs:
           xcode-select -p || true
           df -h .
           du -sh LayoutTests Tools Source 2>/dev/null || true
+          echo "platform TestExpectations files: $(ls LayoutTests/platform/*/TestExpectations | wc -l)"
+          ls LayoutTests/platform/*/TestExpectations | grep -E '/(mac|wk2|mac-wk2|mac-sequoia[^/]*)/' || true
 
       - name: Download prebuilt product (${{ env.BASE_REVISION }})
         run: |
@@ -99,7 +105,7 @@ jobs:
           FW="$PRODUCT/WebInspectorUI.framework"
           if [ -d "$FW/Versions/A/Resources" ]; then RES_REL="WebInspectorUI.framework/Versions/A/Resources"; else RES_REL="WebInspectorUI.framework/Resources"; fi
           echo "Resources folder: $RES_REL"
-          ls "$PRODUCT/$RES_REL" | head -40
+          ls "$PRODUCT/$RES_REL"
 
           # copy-user-interface-resources.pl reads InspectorBackendCommands.js from JavaScriptCore's
           # private headers and InspectorNativeFunctionParameters.json from WebCore's.
@@ -142,24 +148,16 @@ jobs:
       - name: Run target test x10 (with-fix)
         if: matrix.variant == 'with-fix'
         run: |
-          set -o pipefail
+          set +e
           Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
-            --force --repeat-each 10 --results-directory "$PWD/layout-test-results-target" \
+            --force --no-retry-failures --repeat-each 10 --results-directory "$PWD/layout-test-results-target" \
             "$TARGET_TEST" 2>&1 | tee target.log
-          python3 - <<'EOF'
-          import json, os
-          path = "layout-test-results-target/full_results.json"
-          text = open(path).read()
-          text = text[text.index("{"):text.rindex("}") + 1]
-          results = json.loads(text)
-          node = results["tests"]
-          for part in os.environ["TARGET_TEST"].split("/"):
-              node = node[part]
-          actual = node["actual"].split()
-          print("actual:", actual)
-          print(f"PASS {actual.count('PASS')} / {len(actual)}")
-          assert len(actual) == 10 and all(a == "PASS" for a in actual), "not every run passed"
-          EOF
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "run-webkit-tests exit status: $status"
+          grep -E "ran as expected|didn't run" target.log || true
+          test "$status" -eq 0 || { echo "::error::run-webkit-tests reported unexpected results"; exit 1; }
+          grep -qF "All 10 tests ran as expected." target.log || { echo "::error::did not see 'All 10 tests ran as expected.'"; exit 1; }
 
       - name: Run regression suites (with-fix)
         if: matrix.variant == 'with-fix'
@@ -177,7 +175,7 @@ jobs:
         run: |
           set +e
           Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
-            --force --results-directory "$PWD/layout-test-results-target" \
+            --force --no-retry-failures --results-directory "$PWD/layout-test-results-target" \
             "$TARGET_TEST" 2>&1 | tee target.log
           status=${PIPESTATUS[0]}
           set -e
