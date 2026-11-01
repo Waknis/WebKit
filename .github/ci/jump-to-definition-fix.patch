@@ -1,0 +1,69 @@
+diff --git a/Source/WebInspectorUI/UserInterface/Protocol/RemoteObject.js b/Source/WebInspectorUI/UserInterface/Protocol/RemoteObject.js
+index b56560d6205f..ed99208bd60b 100644
+--- a/Source/WebInspectorUI/UserInterface/Protocol/RemoteObject.js
++++ b/Source/WebInspectorUI/UserInterface/Protocol/RemoteObject.js
+@@ -560,7 +560,10 @@ WI.RemoteObject = class RemoteObject
+         return WI.RemoteObject.createCallArgument(this);
+     }
+ 
+-    async findFunctionSourceCodeLocation()
++    // Pass `deliveredOnTarget` to use the main-frame fallback for the page target, but only when this target created
++    // this object. The object from `Inspector.inspect` may have been created by another target, and its identifier
++    // can name a different function on this one. See <https://webkit.org/b/328721>.
++    async findFunctionSourceCodeLocation(options = {})
+     {
+         if (!this._isFunction() || !this._objectId)
+             return WI.RemoteObject.SourceCodeLocationPromise.MissingObjectId;
+@@ -573,7 +576,8 @@ WI.RemoteObject = class RemoteObject
+             return WI.RemoteObject.SourceCodeLocationPromise.NoSourceFound;
+         }
+ 
+-        let sourceCode = WI.debuggerManager.scriptForIdentifier(location.scriptId, this._target);
++        // FIXME: <https://webkit.org/b/326433> Resolve functions whose scripts are owned by other frame targets in the same process.
++        let sourceCode = WI.debuggerManager.scriptForStackTraceIdentifier(location.scriptId, this._target, options);
+ 
+         if (!sourceCode || (!WI.settings.engineeringShowInternalScripts.value && isWebKitInternalScript(sourceCode.sourceURL)))
+             return WI.RemoteObject.SourceCodeLocationPromise.NoSourceFound
+diff --git a/Source/WebInspectorUI/UserInterface/Views/ContextMenuUtilities.js b/Source/WebInspectorUI/UserInterface/Views/ContextMenuUtilities.js
+index aa52a94e9c8d..7138ed42bd42 100644
+--- a/Source/WebInspectorUI/UserInterface/Views/ContextMenuUtilities.js
++++ b/Source/WebInspectorUI/UserInterface/Views/ContextMenuUtilities.js
+@@ -308,28 +308,20 @@ WI.appendContextMenuItemsForDOMNode = function(contextMenu, domNode, options = {
+     if (!options.usingLocalDOMNode) {
+         if (domNode.isCustomElement()) {
+             contextMenu.appendItem(WI.UIString("Jump to Definition"), () => {
+-                function didGetFunctionDetails(error, response) {
+-                    if (error)
+-                        return;
+-
+-                    let location = response.location;
+-                    let sourceCode = WI.debuggerManager.scriptForIdentifier(location.scriptId, WI.mainTarget);
+-                    if (!sourceCode)
+-                        return;
+-
+-                    let sourceCodeLocation = sourceCode.createSourceCodeLocation(location.lineNumber, location.columnNumber || 0);
+-                    WI.showSourceCodeLocation(sourceCodeLocation, {
+-                        ignoreNetworkTab: true,
+-                        ignoreSearchTab: true,
+-                    });
+-                }
+-
+                 WI.RemoteObject.resolveNode(domNode).then((remoteObject) => {
+                     remoteObject.getProperty("constructor", (error, result, wasThrown) => {
+                         if (error)
+                             return;
+-                        if (result.type === "function")
+-                            remoteObject.target.DebuggerAgent.getFunctionDetails(result.objectId, didGetFunctionDetails);
++                        if (result.type === "function") {
++                            result.findFunctionSourceCodeLocation({deliveredOnTarget: true}).then((sourceCodeLocation) => {
++                                if (sourceCodeLocation instanceof WI.SourceCodeLocation) {
++                                    WI.showSourceCodeLocation(sourceCodeLocation, {
++                                        ignoreNetworkTab: true,
++                                        ignoreSearchTab: true,
++                                    });
++                                }
++                            });
++                        }
+                         result.release();
+                     });
+                     remoteObject.release();

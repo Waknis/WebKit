@@ -1,0 +1,145 @@
+<!-- webkit-test-runner [ SiteIsolationEnabled=true ] -->
+<script src="../../../inspector/resources/inspector-test.js"></script>
+<script src="../debugger/resources/site-isolation-debugger-test-utilities.js"></script>
+<script src="resources/view-driver.js"></script>
+<script>
+class PageElement extends HTMLElement {
+    constructor()
+    {
+        super();
+    }
+}
+customElements.define("page-element", PageElement);
+
+class PageDefaultConstructorElement extends HTMLElement { }
+customElements.define("page-default-constructor-element", PageDefaultConstructorElement);
+
+function inspectMe()
+{
+}
+
+function decoy()
+{
+}
+
+function test() {
+    let suite = InspectorTest.createAsyncSuite("CI.RealView.SiteIsolation");
+
+    let targetNames = new Map;
+    let mainFrameTargetForTest = null;
+    let pageNode = null;
+    let pageDefaultNode = null;
+    let frameNode = null;
+
+    suite.addTestCase({
+        name: "Setup",
+        async test() {
+            let frameTarget = await waitForFrameTargetForURLContaining("custom-element-definition-frame.html");
+            let mainFrameTarget = await waitForFrameTargetForURLContaining("real-view.html");
+            targetNames.set(frameTarget, "cross-origin frame target");
+            targetNames.set(mainFrameTarget, "main frame target");
+            targetNames.set(WI.pageTarget, "page target");
+            mainFrameTargetForTest = mainFrameTarget;
+
+            let frameDoc = WI.domManager.frameTargetDocumentForTarget(frameTarget);
+            if (!frameDoc)
+                frameDoc = (await WI.domManager.awaitEvent(WI.DOMManager.Event.FrameDocumentAvailable)).data.document;
+            let pageDoc = await WI.domManager.requestDocument();
+
+            pageNode = WI.domManager.nodeForId(await pageDoc.querySelector("page-element"));
+            pageDefaultNode = WI.domManager.nodeForId(await pageDoc.querySelector("page-default-constructor-element"));
+            frameNode = WI.domManager.nodeForId(await frameDoc.querySelector("frame-element"));
+            InspectorTest.expectThat(pageNode?.isCustomElement(), "Found the page element.");
+            InspectorTest.expectThat(pageDefaultNode?.isCustomElement(), "Found the page element with a default constructor.");
+            InspectorTest.expectThat(frameNode?.isCustomElement(), "Found the frame element.");
+        }
+    });
+
+    suite.addTestCase({
+        name: "PageElement",
+        async test() {
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(pageNode), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(pageNode, targetNames));
+        }
+    });
+
+    suite.addTestCase({
+        name: "FrameElement",
+        async test() {
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(frameNode), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(frameNode, targetNames));
+        }
+    });
+
+    suite.addTestCase({
+        name: "PageElementWithDefaultConstructor",
+        async test() {
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(pageDefaultNode), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(pageDefaultNode, targetNames));
+        }
+    });
+
+    suite.addTestCase({
+        name: "ElementDefinedInSameProcessFrame",
+        description: "The page element's class comes from a same-origin iframe's script, which the main frame target does not own.",
+        async test() {
+            let pageDoc = await WI.domManager.requestDocument();
+            let node = WI.domManager.nodeForId(await pageDoc.querySelector("same-process-element"));
+            InspectorTest.expectThat(node?.isCustomElement(), "Found the element defined in the same-origin iframe.");
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(node), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(node, targetNames));
+        }
+    });
+
+    suite.addTestCase({
+        name: "InspectFunction",
+        description: "The console's inspect(function) reaches the frontend as Inspector.inspect, which goes through the same helper.",
+        async test() {
+            let activeTarget = WI.runtimeManager.activeExecutionContext?.target;
+            InspectorTest.log("active execution context's target: " + (targetNames.get(activeTarget) || activeTarget?.constructor.name));
+            observeInspectEvents(targetNames);
+
+            for (let target of [WI.pageTarget, mainFrameTargetForTest]) {
+                let shown = awaitShownLocation();
+                let {wasThrown} = await target.RuntimeAgent.evaluate.invoke({expression: "inspect(inspectMe)", objectGroup: "test", includeCommandLineAPI: true});
+                InspectorTest.log(`inspect(inspectMe) on the ${targetNames.get(target)}: wasThrown=${!!wasThrown}, ${describeJump(await shown, targetNames)}`);
+            }
+        }
+    });
+
+    suite.addTestCase({
+        name: "InspectFunctionWithColliding",
+        description: "Fill the page target's injected script with a decoy function at the ids the main frame target will use next, then run inspect(inspectMe) on the main frame target.",
+        async test() {
+            let idOf = (response) => JSON.parse(response.result.objectId);
+
+            let frameProbe = idOf(await mainFrameTargetForTest.RuntimeAgent.evaluate.invoke({expression: "inspectMe", objectGroup: "test"}));
+            let pageProbe = idOf(await WI.pageTarget.RuntimeAgent.evaluate.invoke({expression: "decoy", objectGroup: "test"}));
+            InspectorTest.log(`object ids before: main frame target ${JSON.stringify(frameProbe)}, page target ${JSON.stringify(pageProbe)}`);
+
+            // Move the main frame target's counter past the page target's, then fill the page target's next few ids with
+            // the decoy, so that the id inspect() is about to create on the main frame target names the decoy on the page target.
+            while (frameProbe.id <= pageProbe.id)
+                frameProbe = idOf(await mainFrameTargetForTest.RuntimeAgent.evaluate.invoke({expression: "inspectMe", objectGroup: "test"}));
+            while (pageProbe.id < frameProbe.id + 5)
+                pageProbe = idOf(await WI.pageTarget.RuntimeAgent.evaluate.invoke({expression: "decoy", objectGroup: "test"}));
+            InspectorTest.log(`object ids after: main frame target ${JSON.stringify(frameProbe)}, page target ${JSON.stringify(pageProbe)}`);
+
+            let shown = awaitShownLocation();
+            await mainFrameTargetForTest.RuntimeAgent.evaluate.invoke({expression: "inspect(inspectMe)", objectGroup: "test", includeCommandLineAPI: true});
+            InspectorTest.log("inspect(inspectMe) on the main frame target: " + describeJump(await shown, targetNames));
+            InspectorTest.log("inspectMe is at line 16 and decoy is at line 20.");
+        }
+    });
+
+    suite.runTestCasesAndFinish();
+}
+</script>
+<body onload="runTest()">
+<p>CI-only: runs the real Jump to Definition callback under Site Isolation.</p>
+<page-element></page-element>
+<page-default-constructor-element></page-default-constructor-element>
+<same-process-element></same-process-element>
+<iframe src="http://localhost:8000/site-isolation/inspector/dom/resources/custom-element-definition-frame.html"></iframe>
+<iframe src="resources/same-process-definer.html"></iframe>
+</body>

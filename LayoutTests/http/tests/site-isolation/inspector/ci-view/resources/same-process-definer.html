@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<script>
+// CI-only: defines a custom element for the parent document from this same-origin frame's script.
+class SameProcessElement extends parent.HTMLElement {
+    constructor()
+    {
+        super();
+    }
+}
+parent.customElements.define("same-process-element", SameProcessElement);
+</script>

@@ -1,0 +1,1 @@
+CI-only placeholder; the workflow reads the actual output.

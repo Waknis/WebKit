@@ -1,0 +1,58 @@
+<!-- webkit-test-runner [ SiteIsolationEnabled=false ] -->
+<script src="../../../inspector/resources/inspector-test.js"></script>
+<script src="resources/view-driver.js"></script>
+<script>
+class PageElement extends HTMLElement {
+    constructor()
+    {
+        super();
+    }
+}
+customElements.define("page-element", PageElement);
+
+class PageDefaultConstructorElement extends HTMLElement { }
+customElements.define("page-default-constructor-element", PageDefaultConstructorElement);
+
+function test() {
+    let suite = InspectorTest.createAsyncSuite("CI.RealView.NoSiteIsolation");
+
+    let targetNames = new Map([[WI.mainTarget, "page target"]]);
+    let pageNode = null;
+    let pageDefaultNode = null;
+
+    suite.addTestCase({
+        name: "Setup",
+        async test() {
+            let pageDoc = await WI.domManager.requestDocument();
+            pageNode = WI.domManager.nodeForId(await pageDoc.querySelector("page-element"));
+            pageDefaultNode = WI.domManager.nodeForId(await pageDoc.querySelector("page-default-constructor-element"));
+            InspectorTest.expectThat(pageNode?.isCustomElement(), "Found the page element.");
+            InspectorTest.expectThat(pageDefaultNode?.isCustomElement(), "Found the page element with a default constructor.");
+            InspectorTest.log("frame targets: " + WI.targets.filter((target) => target.type === WI.TargetType.Frame).length);
+        }
+    });
+
+    suite.addTestCase({
+        name: "PageElement",
+        async test() {
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(pageNode), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(pageNode, targetNames));
+        }
+    });
+
+    suite.addTestCase({
+        name: "PageElementWithDefaultConstructor",
+        async test() {
+            InspectorTest.log("real callback: " + describeJump(await runRealJumpToDefinition(pageDefaultNode), targetNames));
+            InspectorTest.log("details: " + await describeHelperResult(pageDefaultNode, targetNames));
+        }
+    });
+
+    suite.runTestCasesAndFinish();
+}
+</script>
+<body onload="runTest()">
+<p>CI-only: positive control for the real Jump to Definition callback without Site Isolation.</p>
+<page-element></page-element>
+<page-default-constructor-element></page-default-constructor-element>
+</body>
