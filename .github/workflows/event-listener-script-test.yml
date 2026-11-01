@@ -1,0 +1,210 @@
+name: Event listener script layout test
+
+# Runs http/tests/site-isolation/inspector/dom/event-listeners-routing-frame-target.html
+# against WebKit's prebuilt macOS Release product for the base revision, once with the
+# Web Inspector fix on this branch and once with the fix reverted. Only the Web Inspector
+# resources are regenerated; nothing else is built.
+
+on:
+  push:
+    branches: [ci/event-listener-script-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE_REVISION: "325391@main"
+  ARCHIVE_PLATFORM: mac-sequoia
+  ARCHIVE_URL: https://s3-us-west-2.amazonaws.com/archives.webkit.org/mac-sequoia-x86_64-arm64-release/325391@main.zip
+  TARGET_TEST: http/tests/site-isolation/inspector/dom/event-listeners-routing-frame-target.html
+
+jobs:
+  layout-test:
+    name: ${{ matrix.variant }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [with-fix, without-fix]
+
+    steps:
+      - name: Sparse checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/*/
+            /.github/
+            /Tools/
+            /Source/WebInspectorUI/
+            /LayoutTests/*
+            !/LayoutTests/*/
+            /LayoutTests/platform/mac*/TestExpectations
+            /LayoutTests/resources/
+            /LayoutTests/http/*
+            !/LayoutTests/http/*/
+            /LayoutTests/http/conf/
+            /LayoutTests/http/tests/*
+            !/LayoutTests/http/tests/*/
+            /LayoutTests/http/tests/resources/
+            /LayoutTests/http/tests/inspector/
+            /LayoutTests/http/tests/site-isolation/inspector/
+            /LayoutTests/inspector/
+
+      - name: Runner info
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version || true
+          xcode-select -p || true
+          df -h .
+          du -sh LayoutTests Tools Source 2>/dev/null || true
+
+      - name: Download prebuilt product (${{ env.BASE_REVISION }})
+        run: |
+          mkdir -p WebKitBuild
+          curl --fail --location --retry 3 --silent --show-error -o WebKitBuild/release.zip "$ARCHIVE_URL"
+          ls -l WebKitBuild/release.zip
+
+      - name: Extract prebuilt product
+        run: |
+          python3 Tools/CISupport/built-product-archive --platform="$ARCHIVE_PLATFORM" --release extract
+          rm -f WebKitBuild/release.zip
+          ls WebKitBuild/Release | head -50
+          df -h .
+
+      - name: Revert the fix (without-fix only)
+        if: matrix.variant == 'without-fix'
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          p = pathlib.Path("Source/WebInspectorUI/UserInterface/Controllers/DOMManager.js")
+          s = p.read_text()
+          pattern = re.compile(r"(    static scriptForEventListener\(eventListener\)\n    \{\n).*?(\n    \}\n)", re.S)
+          s, n = pattern.subn(r"\1        return WI.debuggerManager.scriptForIdentifier(eventListener.location.scriptId, WI.mainTarget);\2", s, count=1)
+          assert n == 1, "scriptForEventListener not found"
+          p.write_text(s)
+          EOF
+          git diff
+
+      - name: Regenerate Web Inspector resources into WebKitBuild/Release
+        run: |
+          set -euo pipefail
+          PRODUCT="$PWD/WebKitBuild/Release"
+          FW="$PRODUCT/WebInspectorUI.framework"
+          if [ -d "$FW/Versions/A/Resources" ]; then RES_REL="WebInspectorUI.framework/Versions/A/Resources"; else RES_REL="WebInspectorUI.framework/Resources"; fi
+          echo "Resources folder: $RES_REL"
+          ls "$PRODUCT/$RES_REL" | head -40
+
+          # copy-user-interface-resources.pl reads InspectorBackendCommands.js from JavaScriptCore's
+          # private headers and InspectorNativeFunctionParameters.json from WebCore's.
+          JSC_HEADERS="$PRODUCT/JavaScriptCore.framework/PrivateHeaders"
+          if [ ! -f "$JSC_HEADERS/InspectorBackendCommands.js" ]; then
+            echo "::warning::InspectorBackendCommands.js not in JavaScriptCore private headers; using the product's existing copy"
+            JSC_HEADERS="$RUNNER_TEMP/jsc-headers"
+            mkdir -p "$JSC_HEADERS"
+            cp "$PRODUCT/$RES_REL/Protocol/InspectorBackendCommands.js" "$JSC_HEADERS/"
+          fi
+          WEBCORE_HEADERS="$PRODUCT/WebCore.framework/PrivateHeaders"
+          ls -l "$WEBCORE_HEADERS/InspectorNativeFunctionParameters.json" || echo "::warning::InspectorNativeFunctionParameters.json missing"
+
+          cp "$PRODUCT/$RES_REL/TestCombined.js" "$RUNNER_TEMP/TestCombined.before.js" || true
+
+          env SRCROOT="$PWD/Source/WebInspectorUI" \
+              TARGET_BUILD_DIR="$PRODUCT" \
+              BUILT_PRODUCTS_DIR="$PRODUCT" \
+              UNLOCALIZED_RESOURCES_FOLDER_PATH="$RES_REL" \
+              DERIVED_SOURCES_DIR="$RUNNER_TEMP/WebInspectorUI-DerivedSources" \
+              JAVASCRIPTCORE_PRIVATE_HEADERS_DIR="$JSC_HEADERS" \
+              WEBCORE_PRIVATE_HEADERS_DIR="$WEBCORE_HEADERS" \
+              COMBINE_INSPECTOR_RESOURCES=NO \
+              COMBINE_TEST_RESOURCES=YES \
+              perl Source/WebInspectorUI/Scripts/copy-user-interface-resources.pl
+
+          ls -l "$PRODUCT/$RES_REL/TestCombined.js" "$PRODUCT/$RES_REL/Test.html"
+          echo "--- scriptForEventListener in regenerated TestCombined.js:"
+          grep -n -A6 "static scriptForEventListener" "$PRODUCT/$RES_REL/TestCombined.js"
+          if [ "${{ matrix.variant }}" = "with-fix" ]; then
+            grep -q "scriptForStackTraceIdentifier(eventListener.location.scriptId" "$PRODUCT/$RES_REL/TestCombined.js"
+          else
+            grep -q "scriptForIdentifier(eventListener.location.scriptId, WI.mainTarget)" "$PRODUCT/$RES_REL/TestCombined.js"
+          fi
+          if [ -f "$RUNNER_TEMP/TestCombined.before.js" ]; then
+            echo "--- diff stat vs prebuilt TestCombined.js:"
+            diff "$RUNNER_TEMP/TestCombined.before.js" "$PRODUCT/$RES_REL/TestCombined.js" | diffstat 2>/dev/null || diff "$RUNNER_TEMP/TestCombined.before.js" "$PRODUCT/$RES_REL/TestCombined.js" | head -80 || true
+          fi
+
+      - name: Run target test x10 (with-fix)
+        if: matrix.variant == 'with-fix'
+        run: |
+          set -o pipefail
+          Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
+            --force --repeat-each 10 --results-directory "$PWD/layout-test-results-target" \
+            "$TARGET_TEST" 2>&1 | tee target.log
+          python3 - <<'EOF'
+          import json, os
+          path = "layout-test-results-target/full_results.json"
+          text = open(path).read()
+          text = text[text.index("{"):text.rindex("}") + 1]
+          results = json.loads(text)
+          node = results["tests"]
+          for part in os.environ["TARGET_TEST"].split("/"):
+              node = node[part]
+          actual = node["actual"].split()
+          print("actual:", actual)
+          print(f"PASS {actual.count('PASS')} / {len(actual)}")
+          assert len(actual) == 10 and all(a == "PASS" for a in actual), "not every run passed"
+          EOF
+
+      - name: Run regression suites (with-fix)
+        if: matrix.variant == 'with-fix'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
+            --results-directory "$PWD/layout-test-results-regressions" \
+            http/tests/site-isolation/inspector/dom \
+            http/tests/site-isolation/inspector/debugger/stack-trace-page-target.html \
+            inspector/dom 2>&1 | tee regressions.log
+
+      - name: Run target test once (without-fix) and check it fails the right way
+        if: matrix.variant == 'without-fix'
+        run: |
+          set +e
+          Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
+            --force --results-directory "$PWD/layout-test-results-target" \
+            "$TARGET_TEST" 2>&1 | tee target.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "run-webkit-tests exit status: $status"
+          base="layout-test-results-target/${TARGET_TEST%.html}"
+          ls -l "$(dirname "$base")" || true
+          echo "--- actual:"; cat "$base-actual.txt"
+          echo "--- diff:"; cat "$base-diff.txt" || true
+          test "$status" -ne 0 || { echo "::error::test passed without the fix"; exit 1; }
+          for line in \
+            "PASS: Should find the main frame's target." \
+            "FAIL: Page listener's script should belong to the main frame target." \
+            "FAIL: Page listener's script should be the page's script." \
+            "FAIL: Frame listener's script should belong to the frame target." \
+            "FAIL: Frame listener's script should be the frame's script."; do
+            grep -qxF "$line" "$base-actual.txt" || { echo "::error::missing line: $line"; exit 1; }
+            echo "found: $line"
+          done
+
+      - name: Upload layout test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layout-test-results-${{ matrix.variant }}
+          path: |
+            layout-test-results-target
+            layout-test-results-regressions
+            target.log
+            regressions.log
+          if-no-files-found: warn
