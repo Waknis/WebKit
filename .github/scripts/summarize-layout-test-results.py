@@ -27,6 +27,21 @@ def load_full_results(results_dir):
     return json.loads(text[start:end + 1])
 
 
+FAILURE_KINDS = {"TEXT", "IMAGE", "IMAGE+TEXT", "AUDIO"}
+
+
+def is_unexpected(entry):
+    """True if any actual result is not allowed by the test's expectations."""
+    if entry.get("report") in ("REGRESSION", "FLAKY", "MISSING"):
+        return True
+    expected = set(entry.get("expected", "PASS").split())
+    for actual in entry.get("actual", "").split():
+        if actual in expected or (actual in FAILURE_KINDS and "FAIL" in expected):
+            continue
+        return True
+    return False
+
+
 def leaves(node, prefix=""):
     for key, value in sorted(node.items()):
         name = prefix + "/" + key if prefix else key
@@ -75,10 +90,15 @@ def main(argv):
             results.get("num_passes"), results.get("num_regressions"), results.get("num_flaky"),
             results.get("skipped"), results.get("interrupted")))
         failed = {}
+        as_expected = []
         for name, entry in leaves(results.get("tests", {})):
+            if not is_unexpected(entry):
+                # Listed only because TestExpectations allows more than PASS (for example [ Pass Timeout ]).
+                as_expected.append("{} (expected {}, actual {})".format(name, entry.get("expected"), entry.get("actual")))
+                continue
             failed[name] = entry
             out.append("")
-            out.append("--- {}  expected={} actual={} report={}".format(
+            out.append("--- UNEXPECTED {}  expected={} actual={} report={}".format(
                 name, entry.get("expected"), entry.get("actual"), entry.get("report", "-")))
             base = os.path.join(results_dir, os.path.splitext(name)[0])
             for suffix in ("-diff.txt", "-stderr.txt", "-crash-log.txt"):
@@ -93,6 +113,11 @@ def main(argv):
                         out.append(f"    ... ({len(content) - 80} more lines)")
         if not failed:
             out.append("No unexpected results.")
+        if as_expected:
+            out.append("")
+            out.append("Ran as expected under a non-PASS expectation:")
+            for line in as_expected:
+                out.append("    " + line)
         failures_by_label[label] = failed
 
     baseline = failures_by_label.get("baseline")
@@ -105,9 +130,9 @@ def main(argv):
         new = sorted(set(regressions) - set(baseline))
         fixed = sorted(set(baseline) - set(regressions))
         same = sorted(set(regressions) & set(baseline))
-        out.append("Not passing with the fix but passing on the baseline: " + (", ".join(new) if new else "none"))
-        out.append("Not passing on the baseline but passing with the fix: " + (", ".join(fixed) if fixed else "none"))
-        out.append("Not passing on both: " + (", ".join(same) if same else "none"))
+        out.append("Unexpected with the fix, as expected on the baseline: " + (", ".join(new) if new else "none"))
+        out.append("Unexpected on the baseline, as expected with the fix: " + (", ".join(fixed) if fixed else "none"))
+        out.append("Unexpected on both: " + (", ".join(same) if same else "none"))
 
     text = "\n".join(out)
     print(text)
