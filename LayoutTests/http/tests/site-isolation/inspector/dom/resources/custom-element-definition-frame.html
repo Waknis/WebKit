@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cross-Origin Custom Element Definition Frame</title>
+    <script>
+    // An explicit constructor, because a default constructor's location is in a synthesized script, see <https://webkit.org/b/164262>.
+    class FrameElement extends HTMLElement {
+        constructor()
+        {
+            super();
+        }
+    }
+    customElements.define("frame-element", FrameElement);
+    </script>
+</head>
+<body>
+    <frame-element id="frame-element"></frame-element>
+</body>
+</html>

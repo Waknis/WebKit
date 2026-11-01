@@ -560,7 +560,10 @@ WI.RemoteObject = class RemoteObject
         return WI.RemoteObject.createCallArgument(this);
     }
 
-    async findFunctionSourceCodeLocation()
+    // Pass `deliveredOnTarget` to use the main-frame fallback for the page target, but only when this target created
+    // this object. The object from `Inspector.inspect` may have been created by another target, and its identifier
+    // can name a different function on this one. See <https://webkit.org/b/328721>.
+    async findFunctionSourceCodeLocation(options = {})
     {
         if (!this._isFunction() || !this._objectId)
             return WI.RemoteObject.SourceCodeLocationPromise.MissingObjectId;
@@ -573,7 +576,8 @@ WI.RemoteObject = class RemoteObject
             return WI.RemoteObject.SourceCodeLocationPromise.NoSourceFound;
         }
 
-        let sourceCode = WI.debuggerManager.scriptForIdentifier(location.scriptId, this._target);
+        // FIXME: <https://webkit.org/b/326433> Resolve functions whose scripts are owned by other frame targets in the same process.
+        let sourceCode = WI.debuggerManager.scriptForStackTraceIdentifier(location.scriptId, this._target, options);
 
         if (!sourceCode || (!WI.settings.engineeringShowInternalScripts.value && isWebKitInternalScript(sourceCode.sourceURL)))
             return WI.RemoteObject.SourceCodeLocationPromise.NoSourceFound

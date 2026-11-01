@@ -1,0 +1,25 @@
+Tests that a custom element's definition resolves to the script that defines it under Site Isolation, for an element in the page and an element in a cross-origin frame.
+
+
+
+== Running test suite: SiteIsolation.DOM.CustomElementDefinition
+-- Running test case: Setup
+PASS: Should find the cross-origin frame target.
+PASS: Should find the main frame target.
+PASS: Frame target should have a document.
+PASS: Page target should have a document.
+PASS: Should find a custom element in the page.
+PASS: The page element should not belong to a frame target.
+PASS: Should find a custom element in the frame.
+PASS: The frame element should belong to the frame target.
+
+-- Running test case: PageElementDefinition
+PASS: Definition's script should belong to the main frame target.
+PASS: Definition's script should be the page's script.
+PASS: Definition should be at the page element's constructor.
+
+-- Running test case: FrameElementDefinition
+PASS: Definition's script should belong to the frame target.
+PASS: Definition's script should be the frame's script.
+PASS: Definition should be at the frame element's constructor.
+

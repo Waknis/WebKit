@@ -1,0 +1,86 @@
+<!-- webkit-test-runner [ SiteIsolationEnabled=true ] -->
+<script src="../../../inspector/resources/inspector-test.js"></script>
+<script src="../debugger/resources/site-isolation-debugger-test-utilities.js"></script>
+<script>
+// An explicit constructor, because a default constructor's location is in a synthesized script, see <https://webkit.org/b/164262>.
+class PageElement extends HTMLElement {
+    constructor()
+    {
+        super();
+    }
+}
+customElements.define("page-element", PageElement);
+
+function test() {
+    let suite = InspectorTest.createAsyncSuite("SiteIsolation.DOM.CustomElementDefinition");
+
+    let frameTarget = null;
+    let mainFrameTarget = null;
+    let pageNode = null;
+    let frameNode = null;
+
+    // The same steps as the "Jump to Definition" context menu item for a custom element.
+    async function findDefinitionLocation(node) {
+        let nodeObject = await WI.RemoteObject.resolveNode(node, "test");
+        let constructorObject = await nodeObject.getProperty("constructor");
+        return constructorObject.findFunctionSourceCodeLocation({deliveredOnTarget: true});
+    }
+
+    suite.addTestCase({
+        name: "Setup",
+        description: "Find a custom element in the page target and a custom element in the cross-origin frame target.",
+        async test() {
+            frameTarget = await waitForFrameTargetForURLContaining("custom-element-definition-frame.html");
+            InspectorTest.expectNotNull(frameTarget, "Should find the cross-origin frame target.");
+
+            mainFrameTarget = await waitForFrameTargetForURLContaining("custom-element-definition-frame-target.html");
+            InspectorTest.expectNotNull(mainFrameTarget, "Should find the main frame target.");
+
+            let frameDoc = WI.domManager.frameTargetDocumentForTarget(frameTarget);
+            if (!frameDoc)
+                frameDoc = (await WI.domManager.awaitEvent(WI.DOMManager.Event.FrameDocumentAvailable)).data.document;
+            InspectorTest.expectNotNull(frameDoc, "Frame target should have a document.");
+
+            let pageDoc = await WI.domManager.requestDocument();
+            InspectorTest.expectNotNull(pageDoc, "Page target should have a document.");
+
+            pageNode = WI.domManager.nodeForId(await pageDoc.querySelector("page-element"));
+            InspectorTest.expectThat(pageNode?.isCustomElement(), "Should find a custom element in the page.");
+            InspectorTest.expectThat(!pageNode?.owningTarget, "The page element should not belong to a frame target.");
+
+            frameNode = WI.domManager.nodeForId(await frameDoc.querySelector("frame-element"));
+            InspectorTest.expectThat(frameNode?.isCustomElement(), "Should find a custom element in the frame.");
+            InspectorTest.expectThat(frameNode?.owningTarget === frameTarget, "The frame element should belong to the frame target.");
+        }
+    });
+
+    suite.addTestCase({
+        name: "PageElementDefinition",
+        description: "The page target owns no scripts, so the definition of an element in the page is resolved on the main frame target.",
+        async test() {
+            let location = await findDefinitionLocation(pageNode);
+            InspectorTest.expectThat(location?.sourceCode?.target === mainFrameTarget, "Definition's script should belong to the main frame target.");
+            InspectorTest.expectThat(location?.sourceCode?.url?.includes("custom-element-definition-frame-target.html"), "Definition's script should be the page's script.");
+            InspectorTest.expectEqual(location?.lineNumber, 6, "Definition should be at the page element's constructor.");
+        }
+    });
+
+    suite.addTestCase({
+        name: "FrameElementDefinition",
+        description: "The definition of an element in the cross-origin frame is resolved on the frame target that answered for it.",
+        async test() {
+            let location = await findDefinitionLocation(frameNode);
+            InspectorTest.expectThat(location?.sourceCode?.target === frameTarget, "Definition's script should belong to the frame target.");
+            InspectorTest.expectThat(location?.sourceCode?.url?.includes("custom-element-definition-frame.html"), "Definition's script should be the frame's script.");
+            InspectorTest.expectEqual(location?.lineNumber, 7, "Definition should be at the frame element's constructor.");
+        }
+    });
+
+    suite.runTestCasesAndFinish();
+}
+</script>
+<body onload="runTest()">
+<p>Tests that a custom element's definition resolves to the script that defines it under Site Isolation, for an element in the page and an element in a cross-origin frame.</p>
+<page-element></page-element>
+<iframe src="http://localhost:8000/site-isolation/inspector/dom/resources/custom-element-definition-frame.html"></iframe>
+</body>

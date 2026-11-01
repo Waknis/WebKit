@@ -308,28 +308,20 @@ WI.appendContextMenuItemsForDOMNode = function(contextMenu, domNode, options = {
     if (!options.usingLocalDOMNode) {
         if (domNode.isCustomElement()) {
             contextMenu.appendItem(WI.UIString("Jump to Definition"), () => {
-                function didGetFunctionDetails(error, response) {
-                    if (error)
-                        return;
-
-                    let location = response.location;
-                    let sourceCode = WI.debuggerManager.scriptForIdentifier(location.scriptId, WI.mainTarget);
-                    if (!sourceCode)
-                        return;
-
-                    let sourceCodeLocation = sourceCode.createSourceCodeLocation(location.lineNumber, location.columnNumber || 0);
-                    WI.showSourceCodeLocation(sourceCodeLocation, {
-                        ignoreNetworkTab: true,
-                        ignoreSearchTab: true,
-                    });
-                }
-
                 WI.RemoteObject.resolveNode(domNode).then((remoteObject) => {
                     remoteObject.getProperty("constructor", (error, result, wasThrown) => {
                         if (error)
                             return;
-                        if (result.type === "function")
-                            remoteObject.target.DebuggerAgent.getFunctionDetails(result.objectId, didGetFunctionDetails);
+                        if (result.type === "function") {
+                            result.findFunctionSourceCodeLocation({deliveredOnTarget: true}).then((sourceCodeLocation) => {
+                                if (sourceCodeLocation instanceof WI.SourceCodeLocation) {
+                                    WI.showSourceCodeLocation(sourceCodeLocation, {
+                                        ignoreNetworkTab: true,
+                                        ignoreSearchTab: true,
+                                    });
+                                }
+                            });
+                        }
                         result.release();
                     });
                     remoteObject.release();
