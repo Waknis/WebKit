@@ -794,6 +794,14 @@ WI.DOMManager = class DOMManager extends WI.Object
         return DOMManager.supportsEventListenerBreakpoints() && !eventListener.owningTarget;
     }
 
+    static scriptForEventListener(eventListener)
+    {
+        // A listener's location names a script in the process of the target that delivered it. As with a stack
+        // trace delivered on the page target, that is the main frame's process if there is no owning target.
+        let target = eventListener.owningTarget || WI.assumingMainTarget();
+        return WI.debuggerManager.scriptForStackTraceIdentifier(eventListener.location.scriptId, target, {deliveredOnTarget: true});
+    }
+
     static supportsEditingUserAgentShadowTrees({frontendOnly, target} = {})
     {
         target = target || InspectorBackend;
