@@ -18,6 +18,13 @@ env:
   ARCHIVE_PLATFORM: mac-sequoia
   ARCHIVE_URL: https://s3-us-west-2.amazonaws.com/archives.webkit.org/mac-sequoia-x86_64-arm64-release/325391@main.zip
   TARGET_TEST: http/tests/site-isolation/inspector/dom/event-listeners-routing-frame-target.html
+  REGRESSION_TESTS: >-
+    http/tests/site-isolation/inspector/dom
+    http/tests/site-isolation/inspector/debugger/stack-trace-page-target.html
+    inspector/dom
+  # A sparse checkout makes run-webkit-tests warn about every TestExpectations line for a test
+  # that is not checked out; drop those lines from the logs.
+  NOISE: "Path does not exist"
 
 jobs:
   layout-test:
@@ -46,6 +53,8 @@ jobs:
             !/LayoutTests/*/
             /LayoutTests/platform/*/TestExpectations
             /LayoutTests/resources/
+            /LayoutTests/media/content/test.mp4
+            /LayoutTests/media/content/test.webm
             /LayoutTests/http/*
             !/LayoutTests/http/*/
             /LayoutTests/http/conf/
@@ -62,14 +71,17 @@ jobs:
 
       - name: Runner info
         run: |
-          sw_vers
-          uname -m
-          xcodebuild -version || true
-          xcode-select -p || true
+          {
+            echo "variant: ${{ matrix.variant }}"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "runner: $(sw_vers -productName) $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(uname -m)"
+            echo "xcode: $(xcodebuild -version | tr '\n' ' ')"
+            echo "archive: $ARCHIVE_URL"
+          } | tee ci-notes.txt
           df -h .
           du -sh LayoutTests Tools Source 2>/dev/null || true
+          ls -l LayoutTests/media/content || true
           echo "platform TestExpectations files: $(ls LayoutTests/platform/*/TestExpectations | wc -l)"
-          ls LayoutTests/platform/*/TestExpectations | grep -E '/(mac|wk2|mac-wk2|mac-sequoia[^/]*)/' || true
 
       - name: Download prebuilt product (${{ env.BASE_REVISION }})
         run: |
@@ -81,8 +93,20 @@ jobs:
         run: |
           python3 Tools/CISupport/built-product-archive --platform="$ARCHIVE_PLATFORM" --release extract
           rm -f WebKitBuild/release.zip
-          ls WebKitBuild/Release | head -50
+          ls WebKitBuild/Release
           df -h .
+
+      - name: Baseline - regression suites on the unmodified prebuilt Web Inspector (with-fix only)
+        if: matrix.variant == 'with-fix'
+        continue-on-error: true
+        run: |
+          set +e
+          Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
+            --results-directory "$PWD/layout-test-results-baseline" \
+            $REGRESSION_TESTS 2>&1 | grep --line-buffered -v "$NOISE" | tee baseline.log
+          status=${PIPESTATUS[0]}
+          echo "run-webkit-tests exit status: $status" | tee -a baseline.log
+          exit $status
 
       - name: Revert the fix (without-fix only)
         if: matrix.variant == 'without-fix'
@@ -96,7 +120,7 @@ jobs:
           assert n == 1, "scriptForEventListener not found"
           p.write_text(s)
           EOF
-          git diff
+          git diff | tee revert.diff
 
       - name: Regenerate Web Inspector resources into WebKitBuild/Release
         run: |
@@ -110,16 +134,24 @@ jobs:
           # copy-user-interface-resources.pl reads InspectorBackendCommands.js from JavaScriptCore's
           # private headers and InspectorNativeFunctionParameters.json from WebCore's.
           JSC_HEADERS="$PRODUCT/JavaScriptCore.framework/PrivateHeaders"
-          if [ ! -f "$JSC_HEADERS/InspectorBackendCommands.js" ]; then
+          if [ -f "$JSC_HEADERS/InspectorBackendCommands.js" ]; then
+            echo "regen: InspectorBackendCommands.js from JavaScriptCore private headers" >> ci-notes.txt
+          else
             echo "::warning::InspectorBackendCommands.js not in JavaScriptCore private headers; using the product's existing copy"
+            echo "regen: InspectorBackendCommands.js missing from JavaScriptCore private headers; reused the product's copy" >> ci-notes.txt
             JSC_HEADERS="$RUNNER_TEMP/jsc-headers"
             mkdir -p "$JSC_HEADERS"
             cp "$PRODUCT/$RES_REL/Protocol/InspectorBackendCommands.js" "$JSC_HEADERS/"
           fi
           WEBCORE_HEADERS="$PRODUCT/WebCore.framework/PrivateHeaders"
-          ls -l "$WEBCORE_HEADERS/InspectorNativeFunctionParameters.json" || echo "::warning::InspectorNativeFunctionParameters.json missing"
+          if [ -f "$WEBCORE_HEADERS/InspectorNativeFunctionParameters.json" ]; then
+            echo "regen: InspectorNativeFunctionParameters.json from WebCore private headers" >> ci-notes.txt
+          else
+            echo "::warning::InspectorNativeFunctionParameters.json missing"
+            echo "regen: InspectorNativeFunctionParameters.json missing from WebCore private headers" >> ci-notes.txt
+          fi
 
-          cp "$PRODUCT/$RES_REL/TestCombined.js" "$RUNNER_TEMP/TestCombined.before.js" || true
+          cp "$PRODUCT/$RES_REL/TestCombined.js" "$RUNNER_TEMP/TestCombined.before.js"
 
           env SRCROOT="$PWD/Source/WebInspectorUI" \
               TARGET_BUILD_DIR="$PRODUCT" \
@@ -140,10 +172,12 @@ jobs:
           else
             grep -q "scriptForIdentifier(eventListener.location.scriptId, WI.mainTarget)" "$PRODUCT/$RES_REL/TestCombined.js"
           fi
-          if [ -f "$RUNNER_TEMP/TestCombined.before.js" ]; then
-            echo "--- diff stat vs prebuilt TestCombined.js:"
-            diff "$RUNNER_TEMP/TestCombined.before.js" "$PRODUCT/$RES_REL/TestCombined.js" | diffstat 2>/dev/null || diff "$RUNNER_TEMP/TestCombined.before.js" "$PRODUCT/$RES_REL/TestCombined.js" | head -80 || true
-          fi
+
+          # Everything other than this branch's Web Inspector changes should match WebKit's own build.
+          diff -u "$RUNNER_TEMP/TestCombined.before.js" "$PRODUCT/$RES_REL/TestCombined.js" > TestCombined.diff || true
+          echo "regen: TestCombined.js prebuilt -> regenerated diff: $(grep -c '^[-+][^-+]' TestCombined.diff || true) changed lines" >> ci-notes.txt
+          echo "--- TestCombined.js, prebuilt vs regenerated (first 400 lines):"
+          head -n 400 TestCombined.diff
 
       - name: Run target test x10 (with-fix)
         if: matrix.variant == 'with-fix'
@@ -151,24 +185,25 @@ jobs:
           set +e
           Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
             --force --no-retry-failures --repeat-each 10 --results-directory "$PWD/layout-test-results-target" \
-            "$TARGET_TEST" 2>&1 | tee target.log
+            "$TARGET_TEST" 2>&1 | grep --line-buffered -v "$NOISE" | tee target.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "run-webkit-tests exit status: $status"
-          grep -E "ran as expected|didn't run" target.log || true
+          echo "run-webkit-tests exit status: $status" | tee -a target.log
           test "$status" -eq 0 || { echo "::error::run-webkit-tests reported unexpected results"; exit 1; }
           grep -qF "All 10 tests ran as expected." target.log || { echo "::error::did not see 'All 10 tests ran as expected.'"; exit 1; }
+          echo "target x10: All 10 tests ran as expected." >> ci-notes.txt
 
-      - name: Run regression suites (with-fix)
+      - name: Regression suites with the fix (with-fix only)
         if: matrix.variant == 'with-fix'
         continue-on-error: true
         run: |
-          set -o pipefail
+          set +e
           Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
             --results-directory "$PWD/layout-test-results-regressions" \
-            http/tests/site-isolation/inspector/dom \
-            http/tests/site-isolation/inspector/debugger/stack-trace-page-target.html \
-            inspector/dom 2>&1 | tee regressions.log
+            $REGRESSION_TESTS 2>&1 | grep --line-buffered -v "$NOISE" | tee regressions.log
+          status=${PIPESTATUS[0]}
+          echo "run-webkit-tests exit status: $status" | tee -a regressions.log
+          exit $status
 
       - name: Run target test once (without-fix) and check it fails the right way
         if: matrix.variant == 'without-fix'
@@ -176,12 +211,11 @@ jobs:
           set +e
           Tools/Scripts/run-webkit-tests --release --no-build --no-show-results --no-new-test-results \
             --force --no-retry-failures --results-directory "$PWD/layout-test-results-target" \
-            "$TARGET_TEST" 2>&1 | tee target.log
+            "$TARGET_TEST" 2>&1 | grep --line-buffered -v "$NOISE" | tee target.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "run-webkit-tests exit status: $status"
+          echo "run-webkit-tests exit status: $status" | tee -a target.log
           base="layout-test-results-target/${TARGET_TEST%.html}"
-          ls -l "$(dirname "$base")" || true
           echo "--- actual:"; cat "$base-actual.txt"
           echo "--- diff:"; cat "$base-diff.txt" || true
           test "$status" -ne 0 || { echo "::error::test passed without the fix"; exit 1; }
@@ -192,8 +226,25 @@ jobs:
             "FAIL: Frame listener's script should belong to the frame target." \
             "FAIL: Frame listener's script should be the frame's script."; do
             grep -qxF "$line" "$base-actual.txt" || { echo "::error::missing line: $line"; exit 1; }
-            echo "found: $line"
+            echo "found: $line" | tee -a ci-notes.txt
           done
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== notes"; cat ci-notes.txt || true
+          if [ "${{ matrix.variant }}" = "with-fix" ]; then
+            echo "=== skipped tests in the regression suites"
+            Tools/Scripts/run-webkit-tests --release --no-build --print-expectations $REGRESSION_TESTS 2>&1 \
+              | grep -v "$NOISE" | grep -i "skip" || true
+            python3 .github/scripts/summarize-layout-test-results.py \
+              "target x10=layout-test-results-target:target.log" \
+              "baseline=layout-test-results-baseline:baseline.log" \
+              "regressions=layout-test-results-regressions:regressions.log"
+          else
+            python3 .github/scripts/summarize-layout-test-results.py \
+              "target (fix reverted)=layout-test-results-target:target.log"
+          fi
 
       - name: Upload layout test results
         if: always()
@@ -202,7 +253,12 @@ jobs:
           name: layout-test-results-${{ matrix.variant }}
           path: |
             layout-test-results-target
+            layout-test-results-baseline
             layout-test-results-regressions
             target.log
+            baseline.log
             regressions.log
+            ci-notes.txt
+            revert.diff
+            TestCombined.diff
           if-no-files-found: warn
